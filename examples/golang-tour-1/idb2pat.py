@@ -31,6 +31,7 @@ def crc16(data, crc):
     return crc & 0xffff
 
 
+# TODO: don't do this
 def get_func_at_ea(ea):
     for i in xrange(get_func_qty()):
         f = getn_func(i)
@@ -43,6 +44,7 @@ class BadAddressException(Exception):
     pass
 
 
+# TODO: standardize on error handling
 def find_ref_loc(config, ea, ref):
     if ea == BADADDR:
         raise BadAddressException()
@@ -61,6 +63,7 @@ class FuncTooShortException(Exception):
     pass
 
 
+# ported from IDB2SIG plugin updated by TQN
 def make_func_sig(config, func):
     """
     type config: Config
@@ -78,51 +81,56 @@ def make_func_sig(config, func):
     variable_bytes = {}  # type: dict(idc.ea_t, bool)
 
     while ea != BADADDR and ea < func.endEA:
-        logger.debug("ea: %s %d", hex(ea), ea)
+        logger.debug("ea: %s", hex(ea))
 
+        # TODO: what is the first arg here?
         if get_name(0, ea) != None:
-            logger.debug("name")
+            logger.debug("has a name")
             publics.append(ea)
 
         ref = get_first_dref_from(ea)
         if ref != BADADDR:
-            logger.debug("data ref")
+            # data ref
+            logger.debug("has data ref")
             ref_loc = find_ref_loc(config, ea, ref)
             if ref_loc != BADADDR:
-                logger.debug("ref loc: %s", hex(ref_loc))
+                logger.debug("  ref loc: %s", hex(ref_loc))
                 for i in xrange(config.pointer_size):
-                    logger.debug("variable %s", hex(ref_loc + i))
+                    logger.debug("    variable %s", hex(ref_loc + i))
                     variable_bytes[ref_loc + i] = True
                 refs[ref_loc] = ref
 
+            # not sure why we only care about two...
+            # only two possible operands?
             ref = get_next_dref_from(ea, ref)
             if ref != BADADDR:
-                logger.debug("data ref2")
+                logger.debug("has data ref2")
                 ref_loc = find_ref_loc(config, ea, ref)
                 if ref_loc != BADADDR:
-                    logger.debug("ref loc: %s", hex(ref_loc))
+                    logger.debug("  ref loc: %s", hex(ref_loc))
                     for i in xrange(config.pointer_size):
-                        logger.debug("variable %s", hex(ref_loc + i))
+                        logger.debug("    variable %s", hex(ref_loc + i))
                         variable_bytes[ref_loc + i] = True
                     refs[ref_loc] = ref
         else:
             # code ref
             ref = get_first_fcref_from(ea)
             if ref != BADADDR:
-                logger.debug("code ref")
+                logger.debug("has code ref")
                 if ref < func.startEA or ref >= func.endEA:
                     # code ref is outside function
                     ref_loc = find_ref_loc(config, ea, ref)
                     if BADADDR != ref_loc:
-                        logger.debug("ref loc: %s", hex(ref_loc))
+                        logger.debug("  ref loc: %s", hex(ref_loc))
                         for i in xrange(config.pointer_size):
-                            logger.debug("variable %s", hex(ref_loc + i))
+                            logger.debug("    variable %s", hex(ref_loc + i))
                             variable_bytes[ref_loc + i] = True
                         refs[ref_loc] = ref
 
         ea = next_not_tail(ea)
 
     sig = ""
+    # first 32 bytes, or til end of function
     for ea in xrange(func.startEA, min(func.startEA + 32, func.endEA)):
         if variable_bytes.get(ea, False) == True:
             sig += ".."
@@ -131,22 +139,19 @@ def make_func_sig(config, func):
 
     sig += ".." * (32 - len(sig))
 
-    logger.debug("sig: %s", sig)
-
     crc_data = [0 for i in xrange(256)]
+    # for 255 bytes starting at index 32, or til end of function, or variable byte
     for i in xrange(32, min(func.endEA - func.startEA, 255 + 32)):
         if variable_bytes.get(i, False) == True:
             break
         crc_data[i - 32] = get_byte(func.startEA + i)
 
+    # TODO: is this required everywhere? ie. with variable bytes?
     alen = i - 32 + 1  # plus 1 to offset the for-loop break
 
-    crc = crc16("".join(map(chr, crc_data[:alen])), crc=0xFFFF) &  0xFFFFFFFF
-    logger.debug("alen: %s", hex(alen))
+    crc = crc16(to_bytestring(crc_data[:alen]), crc=0xFFFF)
     sig += " %02x" % (alen)
-    logger.debug("crc: %s", hex(crc))
     sig += " %04X" % (crc)
-    logger.debug("len: %s", hex(func.endEA - func.startEA))
     sig += " %04X" % (func.endEA - func.startEA)
 
     # this will be either " :%04d %s" or " :%08d %s"
@@ -155,6 +160,10 @@ def make_func_sig(config, func):
         sig += public_format % (public - func.startEA, get_name(0, public))
 
     logger.debug("sig: %s", sig)
+
+
+def to_bytestring(seq):
+    return "".join(map(chr, seq))
 
 
 def main():
