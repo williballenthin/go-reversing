@@ -274,7 +274,7 @@ def make_func_sigs(config):
     sigs = []
     if config.mode == USER_SELECT_FUNCTION:
         f = choose_func("Choose Function:", BADADDR)
-        if func is None:
+        if f is None:
             logger.error("No function selected")
             return []
         jumpto(f.startEA)
