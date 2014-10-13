@@ -6,6 +6,7 @@ from collections import namedtuple
 from idc import *
 from idaapi import *
 
+# TODO: make this into an enum
 FUNCTION_MODE_MIN = 0
 NON_AUTO_FUNCTIONS = FUNCTION_MODE_MIN
 LIBRARY_FUNCTIONS = 1
@@ -46,6 +47,7 @@ class Config(object):
         """
         self.min_func_length = vals.get("min_func_length", self.min_func_length)
         self.pointer_size = vals.get("pointer_size", self.pointer_size)
+        # TODO: make this a string, not magic number
         self.mode = vals.get("mode", self.mode)
         self.pat_append = vals.get("pat_append", self.pat_append)
         self.logfile = vals.get("logfile", self.logfile)
@@ -161,7 +163,7 @@ def make_func_sig(config, func):
     ea = func.startEA
     publics = []  # type: idc.ea_t
     refs = {}  # type: dict(idc.ea_t, idc.ea_t)
-    variable_bytes = {}  # type: dict(idc.ea_t, bool)
+    variable_bytes = set([])  # type: set of idc.ea_t
 
     while ea != BADADDR and ea < func.endEA:
         logger.debug("ea: %s", hex(ea))
@@ -181,7 +183,7 @@ def make_func_sig(config, func):
                 logger.debug("  ref loc: %s", hex(ref_loc))
                 for i in xrange(config.pointer_size):
                     logger.debug("    variable %s", hex(ref_loc + i))
-                    variable_bytes[ref_loc + i] = True
+                    variable_bytes.add(ref_loc + i)
                 refs[ref_loc] = ref
 
             # not sure why we only care about two...
@@ -194,7 +196,7 @@ def make_func_sig(config, func):
                     logger.debug("  ref loc: %s", hex(ref_loc))
                     for i in xrange(config.pointer_size):
                         logger.debug("    variable %s", hex(ref_loc + i))
-                        variable_bytes[ref_loc + i] = True
+                        variable_bytes.add(ref_loc + i)
                     refs[ref_loc] = ref
         else:
             # code ref
@@ -208,7 +210,7 @@ def make_func_sig(config, func):
                         logger.debug("  ref loc: %s", hex(ref_loc))
                         for i in xrange(config.pointer_size):
                             logger.debug("    variable %s", hex(ref_loc + i))
-                            variable_bytes[ref_loc + i] = True
+                            variable_bytes.add(ref_loc + i)
                         refs[ref_loc] = ref
 
         ea = next_not_tail(ea)
@@ -216,7 +218,7 @@ def make_func_sig(config, func):
     sig = ""
     # first 32 bytes, or til end of function
     for ea in xrange(func.startEA, min(func.startEA + 32, func.endEA)):
-        if variable_bytes.get(ea, False) == True:
+        if ea in variable_bytes:
             sig += ".."
         else:
             sig += "%02X" % (get_byte(ea))
@@ -226,7 +228,7 @@ def make_func_sig(config, func):
     crc_data = [0 for i in xrange(256)]
     # for 255 bytes starting at index 32, or til end of function, or variable byte
     for i in xrange(32, min(func.endEA - func.startEA, 255 + 32)):
-        if variable_bytes.get(i, False) == True:
+        if i in variable_bytes:
             break
         crc_data[i - 32] = get_byte(func.startEA + i)
 
