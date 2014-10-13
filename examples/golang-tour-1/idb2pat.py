@@ -35,6 +35,8 @@ class Config(object):
         self.min_func_length = min_func_length
         # TODO: get pointer_size from IDA
         self.pointer_size = pointer_size
+        if __EA64__:
+            self.pointer_size = 8
         self.mode = mode
         self.pat_append = pat_append
         self.logfile = logfile
@@ -43,6 +45,8 @@ class Config(object):
 
     def update(self, vals):
         """
+        Set these fields given a dict with a similar schema as this,
+         possibly loaded from a JSON string.
         type vals: dict(string, object)
         """
         self.min_func_length = vals.get("min_func_length", self.min_func_length)
@@ -102,8 +106,12 @@ def get_functions():
         yield getn_func(i)
 
 
+# TODO: idaapi.get_func(ea)
 _g_function_cache = None
 def get_func_at_ea(ea):
+    """
+    type ea: idc.ea_t
+    """
     global _g_function_cache
     if _g_function_cache is None:
         _g_function_cache = {}
@@ -113,11 +121,12 @@ def get_func_at_ea(ea):
     return _g_function_cache.get(f.startEA, None)
 
 
-class BadAddressException(Exception):
-    pass
-
-
 def find_ref_loc(config, ea, ref):
+    """
+    type config: Config
+    type ea: idc.ea_t
+    type ref: idc.ea_t
+    """
     logger = logging.getLogger("idb2pat:find_ref_loc")
     if ea == BADADDR:
         logger.debug("Bad parameter: ea")
@@ -168,9 +177,8 @@ def make_func_sig(config, func):
     while ea != BADADDR and ea < func.endEA:
         logger.debug("ea: %s", hex(ea))
 
-        # TODO: what is the first arg here?
-        flags = getFlags(ea)
-        if has_name(flags) or (config.mode == ALL_FUNCTIONS and has_any_name(flags)):
+        name = get_name(0, ea)
+        if name is not None and name != "":
             logger.debug("has a name")
             publics.append(ea)
 
@@ -223,7 +231,7 @@ def make_func_sig(config, func):
         else:
             sig += "%02X" % (get_byte(ea))
 
-    sig += ".." * (32 - len(sig))
+    sig += ".." * (32 - (len(sig) / 2))
 
     crc_data = [0 for i in xrange(256)]
     # for 255 bytes starting at index 32, or til end of function, or variable byte
@@ -238,6 +246,7 @@ def make_func_sig(config, func):
     crc = crc16(to_bytestring(crc_data[:alen]), crc=0xFFFF)
     sig += " %02X" % (alen)
     sig += " %04X" % (crc)
+    # TODO: does this need to change for 64bit?
     sig += " %04X" % (func.endEA - func.startEA)
 
     # this will be either " :%04d %s" or " :%08d %s"
@@ -247,8 +256,7 @@ def make_func_sig(config, func):
         if name is None or name == "":
             continue
 
-        if is_uname(name) or config.mode == ALL_FUNCTIONS:
-            sig += public_format % (public - func.startEA, name)
+        sig += public_format % (public - func.startEA, name)
 
     for ref_loc, ref in refs.iteritems():
         # TODO: what is the first arg?
@@ -256,16 +264,15 @@ def make_func_sig(config, func):
         if name is None or name == "":
             continue
 
-        if has_user_name(getFlags(ref)) or config.mode == ALL_FUNCTIONS:
-            if ref_loc >= func.startEA:
-                # this will be either " ^%04d %s" or " ^%08d %s"
-                addr = ref_loc - func.startEA
-                ref_format = " ^%%0%dX %%s" % (config.pointer_size)
-            else:
-                # this will be either " ^-%04d %s" or " ^-%08d %s"
-                addrs = func.startEA - ref_loc
-                ref_format = " ^-%%0%dX %%s" % (config.pointer_size)
-            sig += ref_format % (addr, name)
+        if ref_loc >= func.startEA:
+            # this will be either " ^%04d %s" or " ^%08d %s"
+            addr = ref_loc - func.startEA
+            ref_format = " ^%%0%dX %%s" % (config.pointer_size)
+        else:
+            # this will be either " ^-%04d %s" or " ^-%08d %s"
+            addrs = func.startEA - ref_loc
+            ref_format = " ^-%%0%dX %%s" % (config.pointer_size)
+        sig += ref_format % (addr, name)
 
     logger.debug("sig: %s", sig)
     return sig
@@ -288,6 +295,7 @@ def make_func_sigs(config):
             sigs.append(make_func_sig(config, f))
         except Exception as e:
             logger.exception(e)
+            # TODO: GetFunctionName?
             logger.error("Failed to create signature for function at %s (%s)",
                 hex(f.startEA), get_name(0, f.startEA) or "")
 
@@ -296,6 +304,8 @@ def make_func_sigs(config):
             if has_name(getFlags(f.startEA)) and func.flags & FUNC_LIB == 0:
                 try:
                     sigs.append(make_func_sig(config, f))
+                except FuncTooShortException:
+                    pass
                 except Exception as e:
                     logger.exception(e)
                     logger.error("Failed to create signature for function at %s (%s)",
@@ -306,6 +316,8 @@ def make_func_sigs(config):
             if has_name(getFlags(f.startEA)) and func.flags & FUNC_LIB != 0:
                 try:
                     sigs.append(make_func_sig(config, f))
+                except FuncTooShortException:
+                    pass
                 except Exception as e:
                     logger.exception(e)
                     logger.error("Failed to create signature for function at %s (%s)",
@@ -316,6 +328,8 @@ def make_func_sigs(config):
             if is_public_name(f.startEA):
                 try:
                     sigs.append(make_func_sig(config, f))
+                except FuncTooShortException:
+                    pass
                 except Exception as e:
                     logger.exception(e)
                     logger.error("Failed to create signature for function at %s (%s)",
@@ -327,6 +341,8 @@ def make_func_sigs(config):
             if f is not None:
                 try:
                     sigs.append(make_func_sig(config, f))
+                except FuncTooShortException:
+                    pass
                 except Exception as e:
                     logger.exception(e)
                     logger.error("Failed to create signature for function at %s (%s)",
@@ -338,6 +354,8 @@ def make_func_sigs(config):
             try:
                 logger.info("[ %d / %d ] %s %s", i, n, get_name(0, f.startEA), hex(f.startEA))
                 sigs.append(make_func_sig(config, f))
+            except FuncTooShortException:
+                pass
             except Exception as e:
                 logger.exception(e)
                 logger.error("Failed to create signature for function at %s (%s)",
@@ -403,15 +421,15 @@ def main():
             for sig in sigs:
                 f.write(sig)
                 f.write("\r\n")
-                f.write("---")
-                f.write("\r\n")
+            f.write("---")
+            f.write("\r\n")
     else:
         with open(filename, "wb") as f:
             for sig in sigs:
                 f.write(sig)
                 f.write("\r\n")
-                f.write("---")
-                f.write("\r\n")
+            f.write("---")
+            f.write("\r\n")
 
 
 if __name__ == "__main__":
