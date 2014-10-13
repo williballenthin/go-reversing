@@ -1,13 +1,10 @@
+import json
 import logging
 import binascii
 from collections import namedtuple
 
 from idc import *
 from idaapi import *
-
-logging.basicConfig(level=logging.DEBUG)
-g_logger = logging.getLogger("idb2pat")
-
 
 FUNCTION_MODE_MIN = 0
 NON_AUTO_FUNCTIONS = FUNCTION_MODE_MIN
@@ -19,11 +16,29 @@ USER_SELECT_FUNCTION = 5
 FUNCTION_MODE_MAX = USER_SELECT_FUNCTION
 
 
-# use this magic so we can provide default values to namedtuple
-class Config(namedtuple("Config", ["min_func_length", "pointer_size", "mode", "pat_append"])):
-    # TODO: get pointer_size from IDA
-    def __new__(cls, min_func_length=6, pointer_size=4, mode=ALL_FUNCTIONS, pat_append=False):
-        return super(Config, cls).__new__(cls, min_func_length, pointer_size, mode, pat_append)
+def get_ida_logging_handler():
+    """
+    IDA logger should always be the first one (since it inits the env)
+    """
+    return logging.getLogger().handlers[0]
+
+
+logging.basicConfig(level=logging.DEBUG)
+get_ida_logging_handler().setLevel(logging.INFO)
+g_logger = logging.getLogger("idb2pat")
+
+
+class Config(object):
+    def __init__(self, min_func_length=6, pointer_size=4, mode=ALL_FUNCTIONS, pat_append=False, logfile="", loglevel="DEBUG", logenabled=False):
+        super(Config, self).__init__()
+        self.min_func_length = min_func_length
+        # TODO: get pointer_size from IDA
+        self.pointer_size = pointer_size
+        self.mode = mode
+        self.pat_append = pat_append
+        self.logfile = logfile
+        self.loglevel = getattr(logging, loglevel)
+        self.logenabled = logenabled
 
     def update(self, vals):
         """
@@ -33,6 +48,12 @@ class Config(namedtuple("Config", ["min_func_length", "pointer_size", "mode", "p
         self.pointer_size = vals.get("pointer_size", self.pointer_size)
         self.mode = vals.get("mode", self.mode)
         self.pat_append = vals.get("pat_append", self.pat_append)
+        self.logfile = vals.get("logfile", self.logfile)
+        self.logenabled = vals.get("logenabled", self.logenabled)
+
+        if "loglevel" in vals:
+            if hasattr(logging, vals["loglevel"]):
+                self.loglevel = getattr(logging, vals["loglevel"])
 
 
 # generated from IDB2SIG plugin updated by TQN
@@ -95,13 +116,16 @@ class BadAddressException(Exception):
 
 
 def find_ref_loc(config, ea, ref):
+    logger = logging.getLogger("idb2pat:find_ref_loc")
     if ea == BADADDR:
+        logger.debug("Bad parameter: ea")
         return BADADDR
     if ref == BADADDR:
+        logger.debug("Bad parameter: ref")
         return BADADDR
 
     if isCode(getFlags(ea)):
-        for i in xrange(ea, ea + get_item_end(ea) - config.pointer_size):
+        for i in xrange(ea, get_item_end(ea) - config.pointer_size):
             if get_long(i) == ref:
                 return i
 
@@ -195,7 +219,7 @@ def make_func_sig(config, func):
         if variable_bytes.get(ea, False) == True:
             sig += ".."
         else:
-            sig += "%X" % (get_byte(ea))
+            sig += "%02X" % (get_byte(ea))
 
     sig += ".." * (32 - len(sig))
 
@@ -210,7 +234,7 @@ def make_func_sig(config, func):
     alen = i - 32 + 1  # plus 1 to offset the for-loop break
 
     crc = crc16(to_bytestring(crc_data[:alen]), crc=0xFFFF)
-    sig += " %02x" % (alen)
+    sig += " %02X" % (alen)
     sig += " %04X" % (crc)
     sig += " %04X" % (func.endEA - func.startEA)
 
@@ -263,7 +287,7 @@ def make_func_sigs(config):
         except Exception as e:
             logger.exception(e)
             logger.error("Failed to create signature for function at %s (%s)",
-                hex(f.startEA), get_name(f.startEA) or "")
+                hex(f.startEA), get_name(0, f.startEA) or "")
 
     elif config.mode == NON_AUTO_FUNCTIONS:
         for f in get_functions():
@@ -273,7 +297,7 @@ def make_func_sigs(config):
                 except Exception as e:
                     logger.exception(e)
                     logger.error("Failed to create signature for function at %s (%s)",
-                        hex(f.startEA), get_name(f.startEA) or "")
+                        hex(f.startEA), get_name(0, f.startEA) or "")
 
     elif config.mode == LIBRARY_FUNCTIONS:
         for f in get_functions():
@@ -283,7 +307,7 @@ def make_func_sigs(config):
                 except Exception as e:
                     logger.exception(e)
                     logger.error("Failed to create signature for function at %s (%s)",
-                        hex(f.startEA), get_name(f.startEA) or "")
+                        hex(f.startEA), get_name(0, f.startEA) or "")
 
     elif config.mode == PUBLIC_FUNCTIONS:
         for f in get_functions():
@@ -293,7 +317,7 @@ def make_func_sigs(config):
                 except Exception as e:
                     logger.exception(e)
                     logger.error("Failed to create signature for function at %s (%s)",
-                        hex(f.startEA), get_name(f.startEA) or "")
+                        hex(f.startEA), get_name(0, f.startEA) or "")
 
     elif config.mode == ENTRY_POINT_FUNCTIONS:
         for i in xrange(get_func_qty()):
@@ -304,16 +328,18 @@ def make_func_sigs(config):
                 except Exception as e:
                     logger.exception(e)
                     logger.error("Failed to create signature for function at %s (%s)",
-                        hex(f.startEA), get_name(f.startEA) or "")
+                        hex(f.startEA), get_name(0, f.startEA) or "")
 
     elif config.mode == ALL_FUNCTIONS:
-        for f in get_functions():
+        n = get_func_qty()
+        for i, f in enumerate(get_functions()):
             try:
+                logger.info("[ %d / %d ] %s %s", i, n, get_name(0, f.startEA), hex(f.startEA))
                 sigs.append(make_func_sig(config, f))
             except Exception as e:
                 logger.exception(e)
                 logger.error("Failed to create signature for function at %s (%s)",
-                    hex(f.startEA), get_name(f.startEA) or "")
+                    hex(f.startEA), get_name(0, f.startEA) or "")
 
     return sigs
 
@@ -345,7 +371,8 @@ def update_config(config):
 
     try:
         vals = json.loads(t)
-    except Exception:
+    except Exception as e:
+        logger.exception(e)
         logger.warning("Configuration file invalid")
         return
 
@@ -356,6 +383,11 @@ def update_config(config):
 def main():
     c = Config()
     update_config(c)
+
+    if c.logenabled:
+        h = logging.FileHandler(c.logfile)
+        h.setLevel(c.loglevel)
+        logging.getLogger().addHandler(h)
 
     filename = get_pat_file()
     if filename is None:
@@ -368,12 +400,16 @@ def main():
         with open(filename, "ab") as f:
             for sig in sigs:
                 f.write(sig)
-                f.write("\n")
+                f.write("\r\n")
+                f.write("---")
+                f.write("\r\n")
     else:
         with open(filename, "wb") as f:
             for sig in sigs:
                 f.write(sig)
-                f.write("\n")
+                f.write("\r\n")
+                f.write("---")
+                f.write("\r\n")
 
 
 if __name__ == "__main__":
