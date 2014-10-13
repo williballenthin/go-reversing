@@ -2,8 +2,6 @@ import logging
 import binascii
 from collections import namedtuple
 
-import crc16
-
 from idc import *
 from idaapi import *
 
@@ -11,12 +9,30 @@ logging.basicConfig(level=logging.DEBUG)
 g_logger = logging.getLogger("idb2pat")
 
 
+FUNCTION_MODE_MIN = 0
+NON_AUTO_FUNCTIONS = FUNCTION_MODE_MIN
+LIBRARY_FUNCTIONS = 1
+PUBLIC_FUNCTIONS = 2
+ENTRY_POINT_FUNCTIONS = 3
+ALL_FUNCTIONS = 4
+USER_SELECT_FUNCTION = 5
+FUNCTION_MODE_MAX = USER_SELECT_FUNCTION
+
 
 # use this magic so we can provide default values to namedtuple
-class Config(namedtuple("Config", ["min_func_length", "pointer_size"])):
+class Config(namedtuple("Config", ["min_func_length", "pointer_size", "mode", "pat_append"])):
     # TODO: get pointer_size from IDA
-    def __new__(cls, min_func_length=6, pointer_size=4):
-        return super(Config, cls).__new__(cls, min_func_length, pointer_size)
+    def __new__(cls, min_func_length=6, pointer_size=4, mode=ALL_FUNCTIONS, pat_append=False):
+        return super(Config, cls).__new__(cls, min_func_length, pointer_size, mode, pat_append)
+
+    def update(self, vals):
+        """
+        type vals: dict(string, object)
+        """
+        self.min_func_length = vals.get("min_func_length", self.min_func_length)
+        self.pointer_size = vals.get("pointer_size", self.pointer_size)
+        self.mode = vals.get("mode", self.mode)
+        self.pat_append = vals.get("pat_append", self.pat_append)
 
 
 # generated from IDB2SIG plugin updated by TQN
@@ -58,25 +74,31 @@ def crc16(data, crc):
     return crc & 0xffff
 
 
+def get_functions():
+   for i in xrange(get_func_qty()):
+        yield getn_func(i)
+
+
+_g_function_cache = None
 def get_func_at_ea(ea):
-    # TODO: don't do this
-    for i in xrange(get_func_qty()):
-        f = getn_func(i)
-        if f.startEA == ea:
-            return f
-    return None
+    global _g_function_cache
+    if _g_function_cache is None:
+        _g_function_cache = {}
+        for f in get_functions():
+            _g_function_cache[f.startEA] = f
+
+    return _g_function_cache.get(f.startEA, None)
 
 
 class BadAddressException(Exception):
     pass
 
 
-# TODO: standardize on error handling
 def find_ref_loc(config, ea, ref):
     if ea == BADADDR:
-        raise BadAddressException()
+        return BADADDR
     if ref == BADADDR:
-        raise BadAddressException()
+        return BADADDR
 
     if isCode(getFlags(ea)):
         for i in xrange(ea, ea + get_item_end(ea) - config.pointer_size):
@@ -109,7 +131,7 @@ def make_func_sig(config, func):
     logger = logging.getLogger("idb2pat:make_func_sig")
 
     if func.endEA - func.startEA < config.min_func_length:
-        logger.debug("too short")
+        logger.debug("Function is too short")
         raise FuncTooShortException()
 
     ea = func.startEA
@@ -121,7 +143,8 @@ def make_func_sig(config, func):
         logger.debug("ea: %s", hex(ea))
 
         # TODO: what is the first arg here?
-        if get_name(0, ea) != None:
+        flags = getFlags(ea)
+        if has_name(flags) or (config.mode == ALL_FUNCTIONS and has_any_name(flags)):
             logger.debug("has a name")
             publics.append(ea)
 
@@ -194,25 +217,163 @@ def make_func_sig(config, func):
     # this will be either " :%04d %s" or " :%08d %s"
     public_format = " :%%0%dX %%s" % (config.pointer_size)
     for public in publics:
-        sig += public_format % (public - func.startEA, get_name(0, public))
+        name = get_name(0, public)
+        if name is None or name == "":
+            continue
+
+        if is_uname(name) or config.mode == ALL_FUNCTIONS:
+            sig += public_format % (public - func.startEA, name)
+
+    for ref_loc, ref in refs.iteritems():
+        # TODO: what is the first arg?
+        name = get_true_name(0, ref)
+        if name is None or name == "":
+            continue
+
+        if has_user_name(getFlags(ref)) or config.mode == ALL_FUNCTIONS:
+            if ref_loc >= func.startEA:
+                # this will be either " ^%04d %s" or " ^%08d %s"
+                addr = ref_loc - func.startEA
+                ref_format = " ^%%0%dX %%s" % (config.pointer_size)
+            else:
+                # this will be either " ^-%04d %s" or " ^-%08d %s"
+                addrs = func.startEA - ref_loc
+                ref_format = " ^-%%0%dX %%s" % (config.pointer_size)
+            sig += ref_format % (addr, name)
 
     logger.debug("sig: %s", sig)
+    return sig
+
+
+def make_func_sigs(config):
+    logger = logging.getLogger("idb2pat:make_func_sigs")
+    sigs = []
+    if config.mode == USER_SELECT_FUNCTION:
+        f = choose_func("Choose Function:", BADADDR)
+        if func is None:
+            logger.error("No function selected")
+            return []
+        jumpto(f.startEA)
+        if not has_any_name(getFlags(f.startEA)):
+            logger.error("Function doesn't have a name")
+            return []
+
+        try:
+            sigs.append(make_func_sig(config, f))
+        except Exception as e:
+            logger.exception(e)
+            logger.error("Failed to create signature for function at %s (%s)",
+                hex(f.startEA), get_name(f.startEA) or "")
+
+    elif config.mode == NON_AUTO_FUNCTIONS:
+        for f in get_functions():
+            if has_name(getFlags(f.startEA)) and func.flags & FUNC_LIB == 0:
+                try:
+                    sigs.append(make_func_sig(config, f))
+                except Exception as e:
+                    logger.exception(e)
+                    logger.error("Failed to create signature for function at %s (%s)",
+                        hex(f.startEA), get_name(f.startEA) or "")
+
+    elif config.mode == LIBRARY_FUNCTIONS:
+        for f in get_functions():
+            if has_name(getFlags(f.startEA)) and func.flags & FUNC_LIB != 0:
+                try:
+                    sigs.append(make_func_sig(config, f))
+                except Exception as e:
+                    logger.exception(e)
+                    logger.error("Failed to create signature for function at %s (%s)",
+                        hex(f.startEA), get_name(f.startEA) or "")
+
+    elif config.mode == PUBLIC_FUNCTIONS:
+        for f in get_functions():
+            if is_public_name(f.startEA):
+                try:
+                    sigs.append(make_func_sig(config, f))
+                except Exception as e:
+                    logger.exception(e)
+                    logger.error("Failed to create signature for function at %s (%s)",
+                        hex(f.startEA), get_name(f.startEA) or "")
+
+    elif config.mode == ENTRY_POINT_FUNCTIONS:
+        for i in xrange(get_func_qty()):
+            f = get_func(get_entry(get_entry_ordinal(i)))
+            if f is not None:
+                try:
+                    sigs.append(make_func_sig(config, f))
+                except Exception as e:
+                    logger.exception(e)
+                    logger.error("Failed to create signature for function at %s (%s)",
+                        hex(f.startEA), get_name(f.startEA) or "")
+
+    elif config.mode == ALL_FUNCTIONS:
+        for f in get_functions():
+            try:
+                sigs.append(make_func_sig(config, f))
+            except Exception as e:
+                logger.exception(e)
+                logger.error("Failed to create signature for function at %s (%s)",
+                    hex(f.startEA), get_name(f.startEA) or "")
+
+    return sigs
+
+
+def get_pat_file():
+    logger = logging.getLogger("idb2pat:get_pat_file")
+    name, extension = os.path.splitext(get_input_file_path())
+    name = name + ".pat"
+
+    filename = askfile_c(1, name, "Enter the name of the pattern file")
+    if filename is None:
+        logger.debug("User did not choose a pattern file")
+        return None
+
+    return filename
+
+
+def update_config(config):
+    logger = logging.getLogger("idb2pat:update_config")
+    name, extension = os.path.splitext(get_input_file_path())
+    name = name + ".conf"
+
+    if not os.path.exists(name):
+        logger.debug("No configuration file provided, using defaults")
+        return
+
+    with open(name, "rb") as f:
+        t = f.read()
+
+    try:
+        vals = json.loads(t)
+    except Exception:
+        logger.warning("Configuration file invalid")
+        return
+
+    config.update(vals)
+    return
 
 
 def main():
-    print("hello")
     c = Config()
-    start_ea = ScreenEA()
-    if start_ea is None:
-        g_logger.error("need to focus a function")
+    update_config(c)
+
+    filename = get_pat_file()
+    if filename is None:
+        g_logger.debug("No file selected")
         return
 
-    f = get_func_at_ea(start_ea)
-    if f is None:
-        g_logger.error("no func at ea")
-        return
+    sigs = make_func_sigs(c)
 
-    sig = make_func_sig(c, f)
+    if c.pat_append:
+        with open(filename, "ab") as f:
+            for sig in sigs:
+                f.write(sig)
+                f.write("\n")
+    else:
+        with open(filename, "wb") as f:
+            for sig in sigs:
+                f.write(sig)
+                f.write("\n")
 
 
 if __name__ == "__main__":
