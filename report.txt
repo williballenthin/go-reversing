@@ -6,9 +6,143 @@ Go 1.3.3 (20235:f44017549ff9)
     - 1,777 functions!
   - stripping seems to work
   - upx does not work, see [1]
-  - in IDA, need stack pointer enabled
-  - main is named "text"
-  - flair tools don't work on binaries (non-libraries)
+  - flair tools don't work on binaries (statically linked executable, non-libraries)
+    - idb2pat doesn't work on 64bit
+    - dev idb2pat.py, successful
+  - seems all symbols are exported/listed as entry points
+  - main is named "text", or "main.main", at 0x400C00
+    - runtime.main contains init routines for all dependent libraries, then calls main.main
+    - at 0x410775 is call to main_init, which initializes global variables
+    - ds:main_initdone_ is a flag with the values:
+      - 0 - initialize not yet attempted
+      - 1 - initialize started
+      - 2 - initialize completed
+      this allows the system to check for recursion/loops in init routines
+       handled in runtime_throwinit "recursive call during intialization..."
+      other libraries also have this init flag
+  - fs:-0x10 holds pointer to the max stack address
+    - function prologues check this vs rsp, and optionally call runtime_morestack*
+    - "6l/linux rewrites 0(TLS) as -16(FS)"
+  - stack is rsp-based
+    - arguments provided via `mov` relative to rsp
+    - therefore, in IDA, need stack pointer enabled
+       (Options->disassembly->stack pointer)
+  - unknown: runtime_convT2E - copies global object to local instance?
+  - we'll do further calling conventions later
+
+11
+===============================================================================
+  - main.init doesn't do anything, yet
+  - everything is in "text" at 0x400C00
+  - expect 4 private, global variables
+    - one int, i
+    - three bools, c, python, java
+  - variables have nice symbol names, because they're global?
+  - main.i is a global, int64
+  - bools are global, int8
+  - runtime.convT2E(object, type descriptor, ...) (ret, ?err?)
+    - only used for non-int?
+  - fmt.Println(*vargs, vargs_len, vargs_len2, ???) ???
+    - vargs is array of (*item, *type)
+  - runtime.convT2E appears to return this tuple as a single struct (*int128)
+  - args are "pushed" right to left (like normal), though they are mov'd
+  - take a look at src/pkg/runtime/iface.goc
+  - or maybe start with: src/pkg/runtime/runtime.h
+
+
+struct Type
+{
+⇥⇥⇥⇥uintptr size;
+⇥⇥⇥⇥uint32 hash;
+⇥⇥⇥⇥uint8 _unused;
+⇥⇥⇥⇥uint8 align;
+⇥⇥⇥⇥uint8 fieldAlign;
+⇥⇥⇥⇥uint8 kind;
+⇥⇥⇥⇥Alg *alg;
+⇥⇥⇥⇥void *gc;
+⇥⇥⇥⇥String *string;
+⇥⇥⇥⇥UncommonType *x;
+⇥⇥⇥⇥Type *ptrto;
+⇥⇥⇥⇥byte *zero;  // ptr to the zero value for this type
+};
+
+// type.h:20
+value_type_t {
+    int64 length;
+    int64 unknown;
+    func_table_t* func_table;
+    * unknown;  // *maybe* long array of int64?
+    struct_1* unknown;
+    struct_3* unknown;
+    pointer_type_t* pointer_type;
+    zerovalue_t* zerovalue;
+};
+
+value_type_t {
+    int64 length;
+    int64 unknown;
+    func_table_t* func_table;
+    * unknown;  // *maybe* long array of int64?
+    string_t* name;
+    int64 unknown;  // null?
+    int64 unknown;  // "pointer_type"? --> null
+    zerovalue_t* zerovalue;
+    value_type_t* value_type;
+    int64 unknown;
+    int64 unknown;
+    int64 unknown;
+};
+
+// struct Alg, runtime.h:637
+func_table_t {
+    (*memequal)()
+    (*memprint)()
+    (*memcopy)()
+    (*memhash)()
+}
+
+struct⇥⇥Alg
+{
+⇥⇥⇥⇥void⇥⇥⇥⇥(*hash)(uintptr*, uintptr, void*);
+⇥⇥⇥⇥void⇥⇥⇥⇥(*equal)(bool*, uintptr, void*, void*);
+⇥⇥⇥⇥void⇥⇥⇥⇥(*print)(uintptr, void*);
+⇥⇥⇥⇥void⇥⇥⇥⇥(*copy)(uintptr, void*, void*);
+};
+
+
+struct_1 {
+    struct_2* struct_2;
+    int64 unknown;  // 3 for int16?
+}
+
+struct_2 {
+    int64 unknown;
+    int64 unknown;
+    char* name;  // this might be embedded string_t
+    int64 unknown;  // length of name, not including null terminator
+}
+
+string_t {
+    char* value;
+    int64 len;
+}
+
+struct_3 {
+    struct_1* struct_1;
+    int64 unknown;
+    struct_4* struct_4;
+    int64 unknown;
+    int64 unknown;
+}
+
+struct_4 {
+    int64 unknown;
+    int64 unknown;
+    int64 unknown;
+}
+
+
+
 
 
 [1]
@@ -27,10 +161,12 @@ Go 1.3.3 (20235:f44017549ff9)
 
 TODO
 ===============================================================================
-  [ ] read https://www.hex-rays.com/products/ida/tech/flirt/in_depth.shtml
-  [ ] create FLIRT signatures hello world sample
+  [x] read https://www.hex-rays.com/products/ida/tech/flirt/in_depth.shtml
+  [x] create FLIRT signatures hello world sample
   [ ] cross compile each sample for win32/64, linux3, mac
   [x] test UPX
+  [ ] create binary that references all standard libraries, then create .sig
+
 
 
 
