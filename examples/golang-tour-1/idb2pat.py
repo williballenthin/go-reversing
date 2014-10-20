@@ -135,6 +135,10 @@ def find_ref_loc(config, ea, ref):
         logger.debug("Bad parameter: ref")
         return BADADDR
 
+
+    # TODO: handle self-relative references
+    # https://github.com/nihilus/idb2pat/blob/master/idb2pat.cpp#L156
+
     if isCode(getFlags(ea)):
         for i in xrange(ea, get_item_end(ea) - config.pointer_size):
             if get_long(i) == ref:
