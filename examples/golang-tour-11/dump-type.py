@@ -12,7 +12,6 @@ except ImportError:
     g_logger.warning("Failed to import IDA libs")
 
 
-
 class Env(object):
     """
     Interface for static analysis environment APIs
@@ -135,10 +134,11 @@ class W(object):
 class WPrimitive(object):
     is_primitive = True
 
-    def __init__(self, ea, env=guess_env()):
+    def __init__(self, ea, env=guess_env(), parent=None):
         #super(WPrimitive, self).__init__()
         self._env = env
         self._ea = ea
+        self._parent = parent
 
     def value(self):
         return NotImplementedError()
@@ -152,9 +152,9 @@ def MakeWPrimitive(name, fmt, size, str_formatter=str):
     g_logger.debug("make: %s, '%s', %s, %s",
             name, fmt, size, str_formatter)
 
-    def __init__(self, ea, env=guess_env()):
+    def __init__(self, ea, env=guess_env(), parent=None):
         W.__init__(self)
-        WPrimitive.__init__(self, ea, env=env)
+        WPrimitive.__init__(self, ea, env=env, parent=parent)
         Struct.__init__(self, ea, env=env)
 
     def _parse(self):
@@ -190,6 +190,9 @@ Uint32 = MakeWPrimitive("Uint32", "<I", 4)
 Uint64 = MakeWPrimitive("Uint64", "<Q", 8)
 
 
+class ShouldntGetHereException(Exception):
+    pass
+
 
 # type name: str
 # type offset: int
@@ -201,11 +204,12 @@ WField = namedtuple("WField", ["name", "offset", "instance", "len"])
 class WStruct(object):
     is_primitive = False
 
-    def __init__(self, ea, fields, env=guess_env()):
+    def __init__(self, ea, fields, env=guess_env(), parent=None):
         #super(WStruct, self).__init__()
         self._fields = fields
         self._env = env
         self._ea = ea
+        self._parent = parent
 
         self._did_apply_fields = False
         self._applied_fields = []
@@ -220,7 +224,7 @@ class WStruct(object):
         ea = self._ea
         self._total_length = 0
         for field_name, field_type in self._fields:
-            field_instance = field_type(ea, env=self._env)
+            field_instance = field_type(ea, env=self._env, parent=self)
             field_size = len(field_instance)
             field = WField(field_name, ea, field_instance, field_size)
 
@@ -246,10 +250,49 @@ class WStruct(object):
         return "%s(%s)" % (self.__class__.__name__, self._fields)
 
     def get_value(self, name):
+        """
+        Get the field identified by `name`.
+        This will be a WStruct, or WPrimitive, so in the latter case, you'll
+          probably want to call `.value()` on it to make use of the thing.
+        """
         self._apply_fields()
-        return self._fields_by_name[name].instance
+        if name == "^":
+            return self._parent
+        else:  # should be a field name
+            return self._fields_by_name[name].instance
+
+    def get(self, path, sep="."):
+        """
+        Get the (potentially nested) member identified by `path`.
+        Use the `sep` term to split `path` and descend into nested structs.
+        Use "^" to ascend into the parent/enclosing struct.
+        """
+        num_parts = path.count(sep) + 1
+
+        if len(path) == 0:
+            raise IndexError()
+
+        if num_parts == 1:
+            path_name = path.partition(sep)[0]
+            field = self.get_value(path_name)
+            if field.is_primitive:
+                return field.value()
+            else:
+                return field
+
+        else:  # len(parts) > 1
+            our_part, _, their_parts = path.partition(sep)
+            field = self.get_value(our_part)
+            if field.is_primitive:
+                raise IndexError("Field %s is primitive" % our_part)
+            else:
+                return field.get(their_parts)
+        raise ShouldntGetHereException()
 
     def as_dict(self):
+        """
+        Get this (potentially nested) struct as an unordered dict.
+        """
         self._apply_fields()
         ret = {}
         for field in self._applied_fields:
@@ -260,21 +303,21 @@ class WStruct(object):
         return ret
 
 
-
 def MakeWStruct(name, fields):
     """
     type fields: iterable of (str:name, W:type)
     """
     g_logger.debug("make struct: %s, %s", name, fields)
 
-    def __init__(self, ea, env=guess_env()):
-        WStruct.__init__(self, ea, fields, env=env)
+    def __init__(self, ea, env=guess_env(), parent=None):
+        WStruct.__init__(self, ea, fields, env=env, parent=parent)
         W.__init__(self)
 
     methods = {"__init__": __init__}
     for field_name, field_type in fields:
-        # see: http://stackoverflow.com/questions/2295290/what-do-lambda-function-closures-capture-in-python/2295372#2295372
         # for hints on closures and scoping
+        # see: http://stackoverflow.com/questions/2295290/what-do-lambda-funct\
+        #   ion-closures-capture-in-python/2295372#2295372
         methods["get_%s" % field_name] = \
                 lambda self, field_name=field_name: self.get_value(field_name)
 
@@ -320,24 +363,57 @@ def test_simple_struct():
                                (("f1", Uint8),
                                 ("f2", Uint16)))
     ss = SimpleStruct(0, env=env)
-    g_logger.debug("ss.f1: %s", ss.get_f1())
-    g_logger.debug("ss.f2: %s", ss.get_f2())
 
     assert str(ss.get_f1()) == "0x0"
     assert str(ss.get_f2()) == "0x201"
 
     assert ss.get_f1().value() == 0x0
+    assert ss.get("f1") == 0x0
     assert ss.get_f2().value() == 0x201
-
-    g_logger.debug("ss dict: %s", ss.as_dict())
+    assert ss.get("f2") == 0x201
 
     return True
 
 
-def main():
+def test_complex_struct():
+    env = LocalEnv("\x00\x01\x02\x03\xAA\xAA\xAA\xAA")
+
+    SimpleStruct = MakeWStruct("SimpleStruct",
+                               (("f1", Uint8),
+                                ("f2", Uint16)))
+    ComplexStruct = MakeWStruct("ComplexStruct",
+                                (("c1", Uint8),
+                                 ("c2", SimpleStruct)))
+    cs = ComplexStruct(0, env=env)
+
+    assert str(cs.get_c1()) == "0x0"
+    assert str(cs.get_c2().get_f1()) == "0x1"
+    assert str(cs.get_c2().get_f2()) == "0x302"
+
+
+    assert cs.get_c1().value() == 0x0
+    assert cs.get("c1") == 0x0
+    assert cs.get_c2().get_f1().value() == 0x1
+    assert cs.get("c2.f1") == 0x1
+    assert cs.get_c2().get_f2().value() == 0x302
+    assert cs.get("c2.f2") == 0x302
+
+    assert cs.get("c2.^.c1") == 0x0
+
+    return True
+
+
+def do_tests():
     g_logger.info("u8 test: %s", test_u8())
     g_logger.info("u16 test: %s", test_u16())
     g_logger.info("simple struct test: %s", test_simple_struct())
+    g_logger.info("complex struct test: %s", test_complex_struct())
+    g_logger.info("all tests completed successfully")
+
+
+def main():
+    do_tests()
+
 
 if __name__ == "__main__":
     main()
