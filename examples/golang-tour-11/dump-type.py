@@ -146,7 +146,7 @@ class WPrimitive(object):
 
 def MakeWPrimitive(name, fmt, size, str_formatter=str):
     """
-    type size: func(WPrimitive, ea) or int
+    type size: func(WPrimitive:self, int:ea) or int
     """
 
     g_logger.debug("make: %s, '%s', %s, %s",
@@ -184,6 +184,7 @@ def MakeWPrimitive(name, fmt, size, str_formatter=str):
                 "__repr__": __repr__,
                 "value": value})
 
+
 Uint8 = MakeWPrimitive("Uint8", "<B", 1)
 Uint16 = MakeWPrimitive("Uint16", "<H", 2)
 Uint32 = MakeWPrimitive("Uint32", "<I", 4)
@@ -191,6 +192,10 @@ Uint64 = MakeWPrimitive("Uint64", "<Q", 8)
 
 
 class ShouldntGetHereException(Exception):
+    pass
+
+
+class InvalidPathException(Exception):
     pass
 
 
@@ -270,23 +275,62 @@ class WStruct(object):
         num_parts = path.count(sep) + 1
 
         if len(path) == 0:
-            raise IndexError()
+            raise InvalidPathException()
+
+        def split_ptr_name(s):
+            """
+            split "**something" into "**", "something"
+            raise InvalidPathException: if "something" is ""
+            """
+            ptrs = ""  # leading *s
+            name = ""  # everything after leading *s
+
+            for i, c in enumerate(s):
+                if c == "*":
+                    ptrs += "*"
+                else:
+                    name = s[i:]
+                    break
+            if len(name) == 0:
+                raise InvalidPathException()
+            return ptrs, name
 
         if num_parts == 1:
+            # have: next_field
+            # have: *next_field
             path_name = path.partition(sep)[0]
-            field = self.get_value(path_name)
-            if field.is_primitive:
-                return field.value()
+
+            if path_name[0] == "*":
+                ptrs, real_path_name = split_ptr_name(path_name)
+                field = self.get_value(real_path_name)
+                return field.get(ptrs, sep=sep)
             else:
-                return field
+                field = self.get_value(path_name)
+
+                if field.is_primitive:
+                    return field.value()
+                else:
+                    return field
 
         else:  # len(parts) > 1
             our_part, _, their_parts = path.partition(sep)
-            field = self.get_value(our_part)
-            if field.is_primitive:
-                raise IndexError("Field %s is primitive" % our_part)
+
+            if our_part[0] == "*":
+                # have: *next.next_field
+                # have: **next.next_field
+                ptrs, real_path_name = split_ptr_name(our_part)
+                field = self.get_value(real_path_name)
+                # path: *.next_field
+                # path: **.next_field
+                return field.get(ptrs + "." + their_parts)
             else:
-                return field.get(their_parts)
+                # have: next.next_field
+                field = self.get_value(our_part)
+                if field.is_primitive:
+                    raise IndexError("Field %s is primitive" % our_part)
+                else:
+                    # path: next_field
+                    return field.get(their_parts, sep=sep)
         raise ShouldntGetHereException()
 
     def as_dict(self):
@@ -322,6 +366,94 @@ def MakeWStruct(name, fields):
                 lambda self, field_name=field_name: self.get_value(field_name)
 
     return type(name, (WStruct, W), methods)
+
+
+def Pointer(target_type, base=0):
+    """
+    Pointer relative to `base`.
+    So, if you have a relative pointer, provide `base`.
+    If you have an absolute pointer, just use `Pointer(MyStruct(...))`
+    type target_type: W class
+    """
+    g_logger.debug("make ptr: %s", target_type)
+
+    is_primitive = False  # is this correct?
+
+    def __init__(self, ea, env=guess_env(), parent=None):
+        W.__init__(self)
+        WPrimitive.__init__(self, ea, env=env, parent=parent)  # is this correct?
+        Struct.__init__(self, ea, env=env)
+
+    def _parse(self):
+        if self._env.get_arch_bits() == Env.ARCH_BITS_32:
+            return self._unpack("<I", 4, self._ea)
+        elif self._env.get_arch_bits() == Env.ARCH_BITS_64:
+            return self._unpack("<Q", 8, self._ea)
+        else:
+            raise BadArchitectureException()
+
+    def __len__(self):
+        g_logger.debug(self._env)
+        if self._env.get_arch_bits() == Env.ARCH_BITS_32:
+            return 4
+        elif self._env.get_arch_bits() == Env.ARCH_BITS_64:
+            return 8
+        else:
+            raise BadArchitectureException()
+
+    def __str__(self):
+        return hex(self._parse())
+
+    def __repr__(self):
+        if base != 0:
+            return "Pointer(to=%s, base=%s, ea=%s)" % (target_type.__name__,
+                                                       hex(base),
+                                                       hex(ea))
+        else:
+            return "Pointer(to=%s, ea=%s)" % (target_type.__name__, hex(ea))
+
+    def deref(self):
+        return target_type(base + self._parse(), env=self._env, parent=self)
+
+    def get(self, path, sep="."):
+        if len(path) == 0:
+            raise InvalidPathException()
+
+        if path[0] != "*":
+            raise InvalidPathException()
+
+        if len(path) == 1:
+            if target_type.is_primitive:
+                return self.deref().value()
+            else:
+                return self.deref()
+        else:
+            our_part = path[0]
+            their_parts = path[1:]
+
+            if their_parts[0] == sep:
+                # path should have looked like: *.next_field
+                # have to cleanup leading `sep`
+                return self.deref().get(their_parts.lstrip(sep))
+            elif their_parts[0] == "*":
+                # path should have looked like: **.next_field
+                return self.deref().get(their_parts)
+            else:
+                # path should have looked like: *next_field
+                # invalid
+                raise InvalidPathException()
+
+        raise ShouldntGetHereException()
+
+    return type("Pointer",
+               (WPrimitive, Struct, W),
+               {"__init__": __init__,
+                "_parse": _parse,
+                "__len__": __len__,
+                "__str__": __str__,
+                "__repr__": __repr__,
+                "get": get,
+                "deref": deref})
 
 
 def test_u8():
@@ -403,11 +535,54 @@ def test_complex_struct():
     return True
 
 
+def test_pointer():
+    env = LocalEnv("\x04\x00\x00\x00\x00\x01\x02\x03")
+
+    SimpleStruct = MakeWStruct("SimpleStruct",
+                               (("f1", Uint8),
+                                ("f2", Uint16)))
+
+    PointerStruct = MakeWStruct("PointerStruct",
+                                (("p1", Pointer(SimpleStruct)),))
+
+    ps = PointerStruct(0, env=env)
+
+    assert str(ps.get_p1().deref().get_f1()) == "0x0"
+    g_logger.debug(str(ps.get("*p1.f1")))
+    assert str(ps.get("*p1.f1")) == "0x0"
+    assert str(ps.get_p1().deref().get_f2()) == "0x201"
+    assert str(ps.get("*p1.f2")) == "0x201"
+
+    assert ps.get_p1().deref().get_f1().value() == 0x0
+    assert ps.get("*p1.f1") == 0x0
+    assert ps.get_p1().deref().get_f2().value() == 0x201
+    assert ps.get("*p1.f2") == 0x201
+
+
+    return True
+
+
+GoType = MakeWStruct("GoType",
+        (
+            ("size", Uint64),
+            ("hash", Uint32),
+            ("_unused", Uint8),
+            ("align", Uint8),
+            ("fieldAlign", Uint8),
+            ("kind", Uint8),
+            ("alg", Uint64),
+            ("gc", Uint64),
+            ("string", Uint64),
+            ("x", Uint64),
+            ("pointerType", Uint64),
+            ("zeroValue", Uint64)))
+
 def do_tests():
     g_logger.info("u8 test: %s", test_u8())
     g_logger.info("u16 test: %s", test_u16())
     g_logger.info("simple struct test: %s", test_simple_struct())
     g_logger.info("complex struct test: %s", test_complex_struct())
+    g_logger.info("pointer struct test: %s", test_pointer())
     g_logger.info("all tests completed successfully")
 
 
