@@ -715,6 +715,7 @@ def test_string():
     return True
 
 
+# pull these out into another file
 GoAlg = MakeWStruct("GoAlg",
         (
             ("memequal", PointerTo(Uint8)),
@@ -790,16 +791,10 @@ def dump_type(env, ea):
             t.get("*x.*pkgPath.*pstring"))
 
 
-def markup_string(env, ea):
-    t = GoString(ea, env=env)
-
-    val = str(t.get("*pstring"))
-    MakeComm(ea, str("String: %s" % (val)))
-
-    tt = "string_" + val.replace("*", "ptr_")
-
-    for field in t._applied_fields:
-        idaapi.set_name(field.offset, tt + "_" + field.name)
+# TODO: cleanup these markup functions. refactor them out or something
+def markup_fields(base_name, fields):
+    for field in fields:
+        idaapi.set_name(field.offset, base_name + "_" + field.name)
         if len(field.instance) == 1:
             MakeByte(field.offset)
         if len(field.instance) == 2:
@@ -808,6 +803,16 @@ def markup_string(env, ea):
             MakeDword(field.offset)
         if len(field.instance) == 8:
             MakeQword(field.offset)
+
+
+def markup_string(env, ea):
+    t = GoString(ea, env=env)
+
+    val = str(t.get("*pstring"))
+    MakeComm(ea, str("String: %s" % (val)))
+
+    tt = "string_" + val.replace("*", "ptr_")
+    markup_fields(tt, t._applied_fields)  # TODO: don't reach
 
     idaapi.set_name(ea, tt)
 
@@ -819,18 +824,7 @@ def markup_uncommon_type(env, ea):
     MakeComm(ea, str("UncommonType: %s" % (type_name)))
 
     tt = "uncommontype_" + type_name.replace("*", "ptr_")
-
-    for field in t._applied_fields:
-        idaapi.set_name(field.offset, tt + "_" + field.name)
-        if len(field.instance) == 1:
-            MakeByte(field.offset)
-        if len(field.instance) == 2:
-            MakeWord(field.offset)
-        if len(field.instance) == 4:
-            MakeDword(field.offset)
-        if len(field.instance) == 8:
-            MakeQword(field.offset)
-
+    markup_fields(tt, t._applied_fields)  # TODO: don't reach
     idaapi.set_name(ea, tt)
 
     try:
@@ -851,17 +845,7 @@ def markup_type(env, ea):
     MakeComm(ea, str("Type: %s" % (type_name)))
 
     tt = "type_" + type_name.replace("*", "ptr_")
-
-    for field in t._applied_fields:
-        idaapi.set_name(field.offset, tt + "_" + field.name)
-        if len(field.instance) == 1:
-            MakeByte(field.offset)
-        if len(field.instance) == 2:
-            MakeWord(field.offset)
-        if len(field.instance) == 4:
-            MakeDword(field.offset)
-        if len(field.instance) == 8:
-            MakeQword(field.offset)
+    markup_fields(tt, t._applied_fields)  # TODO: don't reach
     idaapi.set_name(ea, tt)
 
     try:
@@ -880,9 +864,9 @@ def dump_this_type():
 
 
 def main():
-#    do_tests()
-#    dump_this_type()
-     markup_type(IDAEnv(), ScreenEA())
+    do_tests()
+    markup_type(IDAEnv(), ScreenEA())
+    dump_this_type()
 
 
 if __name__ == "__main__":
