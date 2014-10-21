@@ -36,7 +36,7 @@ class Env(object):
         raise NotImplementedError()
 
 
-def IDAEnv(Env):
+class IDAEnv(Env):
     def __init__(self):
         super(IDAEnv, self).__init__()
 
@@ -132,8 +132,6 @@ class W(object):
 
 
 class WPrimitive(object):
-    is_primitive = True
-
     def __init__(self, ea, env=guess_env(), parent=None):
         #super(WPrimitive, self).__init__()
         self._env = env
@@ -144,17 +142,32 @@ class WPrimitive(object):
         return NotImplementedError()
 
 
+class WNull(W, WPrimitive):
+    def __init__(self, env=guess_env, parent=None):
+        W.__init__(self)
+        WPrimitive.__init__(self, 0, env, parent)
+
+
+    def __len__(self):
+        return 0
+
+    def __str__(self):
+        return "NULL"
+
+    def __repr__(self):
+        return "NULL"
+
+    def value(self):
+        return 0
+
+
 def MakeWPrimitive(name, fmt, size, str_formatter=str):
     """
     type size: func(WPrimitive:self, int:ea) or int
     """
-
-    g_logger.debug("make: %s, '%s', %s, %s",
-            name, fmt, size, str_formatter)
-
     def __init__(self, ea, env=guess_env(), parent=None):
-        W.__init__(self)
         WPrimitive.__init__(self, ea, env=env, parent=parent)
+        W.__init__(self)
         Struct.__init__(self, ea, env=env)
 
     def _parse(self):
@@ -170,13 +183,13 @@ def MakeWPrimitive(name, fmt, size, str_formatter=str):
         return str_formatter(hex(self._parse()))
 
     def __repr__(self):
-        return "%S(ea=%s)" % (name, hex(ea))
+        return "%s(ea=%s)" % (name, hex(self._ea))
 
     def value(self):
         return self._parse()
 
     return type(name,
-               (WPrimitive, Struct, W),
+               (WPrimitive, W, Struct),
                {"__init__": __init__,
                 "_parse": _parse,
                 "__len__": __len__,
@@ -189,6 +202,53 @@ Uint8 = MakeWPrimitive("Uint8", "<B", 1)
 Uint16 = MakeWPrimitive("Uint16", "<H", 2)
 Uint32 = MakeWPrimitive("Uint32", "<I", 4)
 Uint64 = MakeWPrimitive("Uint64", "<Q", 8)
+
+
+class InvalidParamterException(ValueError):
+    pass
+
+
+class WString(WPrimitive, W, Struct):
+    def __init__(self, ea, size=None, env=guess_env(), parent=None, decoder="UTF-8"):
+        """
+        param size: length in bytes,
+          or path specifier for element containing size, relative to parent
+        """
+        WPrimitive.__init__(self, ea, env=env, parent=parent)
+        W.__init__(self)
+        Struct.__init__(self, ea, env=env)
+        if size is None:
+            raise InvalidParameterException()
+        self._size = size
+        self._decoder = decoder
+
+    def _parse(self):
+        return self.read_bytes(self._ea, len(self)).decode(self._decoder)
+
+    def __len__(self):
+        if isinstance(self._size, basestring):
+            return self._parent.get(self._size)
+        else:
+            return self._size
+
+    def __str__(self):
+        return self._parse()
+
+    def __repr__(self):
+        return "WString(ea=%s)" % (hex(self._ea))
+
+    def value(self):
+        return self._parse()
+
+
+def MakeSizedWString(size):
+    """
+    param size: size in bytes, or path specifier from parent to size element.
+    """
+    def __init__(self, ea, env=guess_env(), parent=None, decoder="UTF-8"):
+        WString.__init__(self, ea, size, env=env, parent=parent, decoder=decoder)
+
+    return type("SizedWString", (WString, ), {"__init__": __init__})
 
 
 class ShouldntGetHereException(Exception):
@@ -207,7 +267,10 @@ WField = namedtuple("WField", ["name", "offset", "instance", "len"])
 
 
 class WStruct(object):
-    is_primitive = False
+
+    FIELD_STATE_NEW = 0
+    FIELD_STATE_STARTED = 1
+    FIELD_STATE_DONE = 2
 
     def __init__(self, ea, fields, env=guess_env(), parent=None):
         #super(WStruct, self).__init__()
@@ -216,16 +279,17 @@ class WStruct(object):
         self._ea = ea
         self._parent = parent
 
-        self._did_apply_fields = False
+        self._field_state = 0
         self._applied_fields = []
         self._fields_by_name = {}  # type: map(str, WField)
         self._fields_by_offset = {}  # type: map(int, WField)
         self._total_length = 0
 
     def _apply_fields(self):
-        if self._did_apply_fields:
+        if self._field_state > WStruct.FIELD_STATE_NEW:
             return
 
+        self._field_state = WStruct.FIELD_STATE_STARTED
         ea = self._ea
         self._total_length = 0
         for field_name, field_type in self._fields:
@@ -240,7 +304,7 @@ class WStruct(object):
             ea += field_size
             self._total_length += field_size
 
-        self._did_apply_fields = True
+        self._field_state = WStruct.FIELD_STATE_DONE
 
     def __len__(self):
         self._apply_fields()
@@ -260,7 +324,9 @@ class WStruct(object):
         This will be a WStruct, or WPrimitive, so in the latter case, you'll
           probably want to call `.value()` on it to make use of the thing.
         """
-        self._apply_fields()
+        if self._field_state == WStruct.FIELD_STATE_NEW:
+            self._apply_fields()
+
         if name == "^":
             return self._parent
         else:  # should be a field name
@@ -279,7 +345,7 @@ class WStruct(object):
 
         def split_ptr_name(s):
             """
-            split "**something" into "**", "something"
+            split "**something" into ("**", "something")
             raise InvalidPathException: if "something" is ""
             """
             ptrs = ""  # leading *s
@@ -307,8 +373,10 @@ class WStruct(object):
             else:
                 field = self.get_value(path_name)
 
-                if field.is_primitive:
+                if isinstance(field, (WPrimitive, WPointer)):
                     return field.value()
+                elif isinstance(field, (WString)):
+                    return str(field)
                 else:
                     return field
 
@@ -326,7 +394,7 @@ class WStruct(object):
             else:
                 # have: next.next_field
                 field = self.get_value(our_part)
-                if field.is_primitive:
+                if isinstance(field, WPrimitive):
                     raise IndexError("Field %s is primitive" % our_part)
                 else:
                     # path: next_field
@@ -340,22 +408,60 @@ class WStruct(object):
         self._apply_fields()
         ret = {}
         for field in self._applied_fields:
-            if field.instance.is_primitive:
+            if isinstance(field, WPrimitive):
                 ret[field.name] = field.instance.value()
             else:
                 ret[field.name] = field.as_dict()
         return ret
+
+    def dump(self, indent=0):
+        self._apply_fields()
+        ret = []
+
+        for field in self._applied_fields:
+            if isinstance(field.instance, (WPrimitive)):
+                ret.append("%s/* %s */ (%s) %s: %s\n" % (
+                           "  " * indent,
+                           hex(field.offset),
+                           repr(field.instance),
+                           field.name,
+                           str(field.instance.value())))
+            elif isinstance(field.instance, (WPointer)):
+                if isinstance(field.instance.deref(), (WPrimitive)):
+                    ret.append("%s/* %s */ *(%s) %s: %s\n" % (
+                               "  " * indent,
+                               hex(field.offset),
+                               repr(field.instance.deref()),
+                               field.name,
+                               str(field.instance.deref().value())))
+                else:
+                    ret.append("%s/* %s */ (%s) %s: %s\n" %
+                               ("  " * indent,
+                               hex(field.offset),
+                               repr(field.instance),
+                               field.name,
+                               hex(field.instance.value())))
+                    ret.append(field.instance.deref().dump(indent + 1))
+
+            else:
+                ret.append("%s/* %s */ (%s) %s:\n" %
+                           ("  " * indent,
+                           hex(field.offset),
+                           repr(field.instance),
+                           field.name))
+                ret.append(field.instance.dump(indent + 1))
+
+        return "".join(ret)
 
 
 def MakeWStruct(name, fields):
     """
     type fields: iterable of (str:name, W:type)
     """
-    g_logger.debug("make struct: %s, %s", name, fields)
-
     def __init__(self, ea, env=guess_env(), parent=None):
+        # TODO: changed this
+        #W.__init__(self)
         WStruct.__init__(self, ea, fields, env=env, parent=parent)
-        W.__init__(self)
 
     methods = {"__init__": __init__}
     for field_name, field_type in fields:
@@ -365,24 +471,28 @@ def MakeWStruct(name, fields):
         methods["get_%s" % field_name] = \
                 lambda self, field_name=field_name: self.get_value(field_name)
 
-    return type(name, (WStruct, W), methods)
+    # TODO: changed this heirarchy
+    return type(name, (WStruct, ), methods)
 
 
-def Pointer(target_type, base=0):
+class WPointer(W, Struct):
+    def __init__(self, ea, env=guess_env(), parent=None):
+        W.__init__(self)
+        Struct.__init__(self, ea, env=env)
+        self._env = env
+        self._parent = parent
+
+
+def PointerTo(target_type, base=0):
     """
     Pointer relative to `base`.
     So, if you have a relative pointer, provide `base`.
     If you have an absolute pointer, just use `Pointer(MyStruct(...))`
     type target_type: W class
+    rtype: subclass of WPointer
     """
-    g_logger.debug("make ptr: %s", target_type)
-
-    is_primitive = False  # is this correct?
-
     def __init__(self, ea, env=guess_env(), parent=None):
-        W.__init__(self)
-        WPrimitive.__init__(self, ea, env=env, parent=parent)  # is this correct?
-        Struct.__init__(self, ea, env=env)
+        WPointer.__init__(self, ea, env, parent)
 
     def _parse(self):
         if self._env.get_arch_bits() == Env.ARCH_BITS_32:
@@ -393,7 +503,6 @@ def Pointer(target_type, base=0):
             raise BadArchitectureException()
 
     def __len__(self):
-        g_logger.debug(self._env)
         if self._env.get_arch_bits() == Env.ARCH_BITS_32:
             return 4
         elif self._env.get_arch_bits() == Env.ARCH_BITS_64:
@@ -408,25 +517,37 @@ def Pointer(target_type, base=0):
         if base != 0:
             return "Pointer(to=%s, base=%s, ea=%s)" % (target_type.__name__,
                                                        hex(base),
-                                                       hex(ea))
+                                                       hex(self._ea))
         else:
-            return "Pointer(to=%s, ea=%s)" % (target_type.__name__, hex(ea))
+            return "Pointer(to=%s, ea=%s)" % (target_type.__name__, hex(self._ea))
 
     def deref(self):
-        return target_type(base + self._parse(), env=self._env, parent=self)
+        ea = self._parse()
+        if ea == 0:
+            g_logger.warning("Dereferencing NULL")
+            return WNull(env=self._env, parent=self)
+
+        return target_type(base + ea, env=self._env, parent=self)
+
+    def value(self):
+        return self._parse()
 
     def get(self, path, sep="."):
         if len(path) == 0:
             raise InvalidPathException()
 
-        if path[0] != "*":
+        if path[0] not in set(["*", "^"]):
             raise InvalidPathException()
 
         if len(path) == 1:
-            if target_type.is_primitive:
+            if isinstance(target_type, WPrimitive):
                 return self.deref().value()
             else:
                 return self.deref()
+        elif path[0] == "^":
+            if len(path) < 2 or path[1] != ".":
+                raise InvalidPathException()
+            return self._parent.get(path.partition(sep)[2])
         else:
             our_part = path[0]
             their_parts = path[1:]
@@ -434,7 +555,11 @@ def Pointer(target_type, base=0):
             if their_parts[0] == sep:
                 # path should have looked like: *.next_field
                 # have to cleanup leading `sep`
-                return self.deref().get(their_parts.lstrip(sep))
+                v = self.deref()
+                if isinstance(v, WPrimitive):
+                    return v.value()
+                else:
+                    return v.get(their_parts.lstrip(sep), sep=sep)
             elif their_parts[0] == "*":
                 # path should have looked like: **.next_field
                 return self.deref().get(their_parts)
@@ -446,13 +571,14 @@ def Pointer(target_type, base=0):
         raise ShouldntGetHereException()
 
     return type("Pointer",
-               (WPrimitive, Struct, W),
+               (WPointer,),
                {"__init__": __init__,
                 "_parse": _parse,
                 "__len__": __len__,
                 "__str__": __str__,
                 "__repr__": __repr__,
                 "get": get,
+                "value": value,
                 "deref": deref})
 
 
@@ -496,6 +622,8 @@ def test_simple_struct():
                                 ("f2", Uint16)))
     ss = SimpleStruct(0, env=env)
 
+    g_logger.debug(ss.get_f1())
+    g_logger.debug(str(ss.get_f1()))
     assert str(ss.get_f1()) == "0x0"
     assert str(ss.get_f2()) == "0x201"
 
@@ -543,23 +671,78 @@ def test_pointer():
                                 ("f2", Uint16)))
 
     PointerStruct = MakeWStruct("PointerStruct",
-                                (("p1", Pointer(SimpleStruct)),))
+                                (("p1", PointerTo(SimpleStruct)),))
 
     ps = PointerStruct(0, env=env)
 
     assert str(ps.get_p1().deref().get_f1()) == "0x0"
-    g_logger.debug(str(ps.get("*p1.f1")))
-    assert str(ps.get("*p1.f1")) == "0x0"
     assert str(ps.get_p1().deref().get_f2()) == "0x201"
-    assert str(ps.get("*p1.f2")) == "0x201"
 
     assert ps.get_p1().deref().get_f1().value() == 0x0
     assert ps.get("*p1.f1") == 0x0
     assert ps.get_p1().deref().get_f2().value() == 0x201
     assert ps.get("*p1.f2") == 0x201
 
+    pi = PointerTo(Uint32)(0, env=env)
+    assert pi.deref().value() == 0x3020100
 
     return True
+
+
+def test_string():
+    env = LocalEnv("\x08\x00\x00\x00\x02\x00\x00\x00Hi\x02\x03")
+
+    SimpleStringStruct = MakeWStruct("SimpleStringStruct",
+                                     (("unused", Uint32),
+                                      ("size", Uint32),
+                                      ("string", MakeSizedWString("size"))))
+
+    ss = SimpleStringStruct(0, env=env)
+
+    assert ss.get("size") == 0x2
+    assert ss.get("string") == u"Hi"
+
+    PointerStringStruct = MakeWStruct("PointerStringStruct",
+                                     (("pstring",
+                                         PointerTo(MakeSizedWString("^.size"))),
+                                      ("size", Uint32)))
+
+    ps = PointerStringStruct(0, env=env)
+
+    assert ps.get("size") == 0x2
+    assert str(ps.get("*pstring")) == u"Hi"
+
+    return True
+
+
+GoAlg = MakeWStruct("GoAlg",
+        (
+            ("memequal", PointerTo(Uint8)),
+            ("memprint", PointerTo(Uint8)),
+            ("memcopy", PointerTo(Uint8)),
+            ("memhash", PointerTo(Uint8))))
+
+
+GoString = MakeWStruct("GoString",
+        (
+            ("pstring", PointerTo(MakeSizedWString("^.size"))),
+            ("size", Uint64)))
+
+
+# TODO
+GoSlice = MakeWStruct("GoSlice",
+        (
+            ("f1", PointerTo(Uint8)),
+            ("f2", Uint64)))
+            #("f3", Uint64)))
+
+
+GoUncommonType = MakeWStruct("GoUncommonType",
+        (
+            ("name", PointerTo(GoString)),
+            ("pkgPath", PointerTo(GoString)),
+            ("mhdr", GoSlice),
+            ("m", PointerTo(Uint8))))  # TODO
 
 
 GoType = MakeWStruct("GoType",
@@ -570,25 +753,138 @@ GoType = MakeWStruct("GoType",
             ("align", Uint8),
             ("fieldAlign", Uint8),
             ("kind", Uint8),
-            ("alg", Uint64),
-            ("gc", Uint64),
-            ("string", Uint64),
-            ("x", Uint64),
-            ("pointerType", Uint64),
-            ("zeroValue", Uint64)))
+            ("alg", PointerTo(GoAlg)),
+            ("gc", PointerTo(Uint8)),
+            ("string", PointerTo(GoString)),
+            ("x", PointerTo(GoUncommonType)),
+            #("pointerType", PointerTo(GoType)),  # recursion doesn't work yet
+            ("pointerType", PointerTo(Uint8)),
+            ("zeroValue", PointerTo(Uint8))))
+
 
 def do_tests():
     g_logger.info("u8 test: %s", test_u8())
     g_logger.info("u16 test: %s", test_u16())
     g_logger.info("simple struct test: %s", test_simple_struct())
     g_logger.info("complex struct test: %s", test_complex_struct())
-    g_logger.info("pointer struct test: %s", test_pointer())
+    g_logger.info("pointer test: %s", test_pointer())
+    g_logger.info("string test: %s", test_string())
     g_logger.info("all tests completed successfully")
 
 
+def dump_type(env, ea):
+    t = GoType(ea, env=env)
+    g_logger.debug("name: %s, size: %s",
+            t.get("*string.*pstring"),
+            hex(t.get_size().value()))
+
+    pointerType = None
+    pointerType = GoType(t.get_pointerType().value(), env=env)
+
+    g_logger.debug("ptr: %s, size: %s",
+            pointerType.get("*string.*pstring"),
+            hex(pointerType.get_size().value()))
+
+    g_logger.debug("uncommon: name: %s, pkgPath: %s",
+            t.get("*x.*name.*pstring"),
+            t.get("*x.*pkgPath.*pstring"))
+
+
+def markup_string(env, ea):
+    t = GoString(ea, env=env)
+
+    val = str(t.get("*pstring"))
+    MakeComm(ea, str("String: %s" % (val)))
+
+    tt = "string_" + val.replace("*", "ptr_")
+
+    for field in t._applied_fields:
+        idaapi.set_name(field.offset, tt + "_" + field.name)
+        if len(field.instance) == 1:
+            MakeByte(field.offset)
+        if len(field.instance) == 2:
+            MakeWord(field.offset)
+        if len(field.instance) == 4:
+            MakeDword(field.offset)
+        if len(field.instance) == 8:
+            MakeQword(field.offset)
+
+    idaapi.set_name(ea, tt)
+
+
+def markup_uncommon_type(env, ea):
+    t = GoUncommonType(ea, env=env)
+
+    type_name = str(t.get("*name.*pstring"))
+    MakeComm(ea, str("UncommonType: %s" % (type_name)))
+
+    tt = "uncommontype_" + type_name.replace("*", "ptr_")
+
+    for field in t._applied_fields:
+        idaapi.set_name(field.offset, tt + "_" + field.name)
+        if len(field.instance) == 1:
+            MakeByte(field.offset)
+        if len(field.instance) == 2:
+            MakeWord(field.offset)
+        if len(field.instance) == 4:
+            MakeDword(field.offset)
+        if len(field.instance) == 8:
+            MakeQword(field.offset)
+
+    idaapi.set_name(ea, tt)
+
+    try:
+        markup_string(env, t.get_name().value())
+    except:
+        g_logger.info("failed to markup uncommon type name string")
+
+    try:
+        markup_string(env, t.get_pkgPath().value())
+    except:
+        g_logger.info("failed to markup uncommon type pkgPath string")
+
+
+def markup_type(env, ea):
+    t = GoType(ea, env=env)
+
+    type_name = str(t.get("*string.*pstring"))
+    MakeComm(ea, str("Type: %s" % (type_name)))
+
+    tt = "type_" + type_name.replace("*", "ptr_")
+
+    for field in t._applied_fields:
+        idaapi.set_name(field.offset, tt + "_" + field.name)
+        if len(field.instance) == 1:
+            MakeByte(field.offset)
+        if len(field.instance) == 2:
+            MakeWord(field.offset)
+        if len(field.instance) == 4:
+            MakeDword(field.offset)
+        if len(field.instance) == 8:
+            MakeQword(field.offset)
+    idaapi.set_name(ea, tt)
+
+    try:
+        markup_uncommon_type(env, t.get_x().value())
+    except:
+        g_logger.info("failed to markup uncommon type")
+
+    try:
+        markup_type(env, t.get_pointerType().value())
+    except:
+        g_logger.info("failed to markup ptr type")
+
+
+def dump_this_type():
+    dump_type(IDAEnv(), ScreenEA())
+
+
 def main():
-    do_tests()
+#    do_tests()
+#    dump_this_type()
+     markup_type(IDAEnv(), ScreenEA())
 
 
 if __name__ == "__main__":
     main()
+
