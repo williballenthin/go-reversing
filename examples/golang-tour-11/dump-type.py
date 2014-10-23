@@ -344,6 +344,15 @@ WField = namedtuple("WField", ["name", "offset", "instance", "len"])
 
 class WStruct(object):
 
+    # these allow us to lookup values of sibling fields without fully
+    #  resolving all of them. They prevent infinite loops when looking
+    #  for those fields.
+    # For instance,
+    #
+    # { int size,
+    #   string data[size] }
+    #
+    # `data` can refer to its previous sibling `size`.
     FIELD_STATE_NEW = 0
     FIELD_STATE_STARTED = 1
     FIELD_STATE_DONE = 2
@@ -355,6 +364,8 @@ class WStruct(object):
         self._ea = ea
         self._parent = parent
 
+        # this is not particularly memory friendly, but
+        #   thats why we have it.
         self._field_state = 0
         self._applied_fields = []
         self._fields_by_name = {}  # type: map(str, WField)
@@ -394,6 +405,10 @@ class WStruct(object):
         self._apply_fields()
         return "%s(%s)" % (self.__class__.__name__, self._fields)
 
+    def get_fields(self):
+        self._apply_fields()
+        return self._applied_fields[:]
+
     def get_value(self, name):
         """
         Get the field identified by `name`.
@@ -413,6 +428,9 @@ class WStruct(object):
         Get the (potentially nested) member identified by `path`.
         Use the `sep` term to split `path` and descend into nested structs.
         Use "^" to ascend into the parent/enclosing struct.
+
+        TODO: refactor.
+        Sorry for the long funcction body.
         """
         num_parts = path.count(sep) + 1
 
@@ -483,7 +501,7 @@ class WStruct(object):
         """
         self._apply_fields()
         ret = {}
-        for field in self._applied_fields:
+        for field in self.get_fields():
             if isinstance(field, WPrimitive):
                 ret[field.name] = field.instance.value()
             else:
@@ -494,7 +512,7 @@ class WStruct(object):
         self._apply_fields()
         ret = []
 
-        for field in self._applied_fields:
+        for field in self.get_fields():
             if isinstance(field.instance, (WPrimitive)):
                 ret.append("%s/* %s */ (%s) %s: %s\n" % (
                            "  " * indent,
@@ -552,6 +570,10 @@ def MakeWStruct(name, fields):
 
 
 class WPointer(W, Struct):
+    """
+    We need a base class so that we can return subclasses
+     pointing to specific pointee types by PointerTo().
+    """
     def __init__(self, ea, env=guess_env(), parent=None):
         W.__init__(self)
         Struct.__init__(self, ea, env=env)
@@ -800,10 +822,21 @@ GoAlg = MakeWStruct("GoAlg",
             ("memhash", PointerTo(Uint8))))
 
 
-GoString = MakeWStruct("GoString",
+_GoString = MakeWStruct("GoString",
         (
             ("pstring", PointerTo(MakeSizedWString("^.size"))),
             ("size", Uint64)))
+
+class GoString(_GoString):
+    """
+    Here's a nice example of subclassing a complex W struct.
+    We provide a nice and natural stringify method for string types.
+    """
+    def __init__(self, *args, **kwargs):
+        _GoString.__init__(self, *args, **kwargs)
+
+    def __str__(self):
+        return self.get("*pstring").value()
 
 
 # TODO
@@ -832,7 +865,7 @@ GoType = MakeWStruct("GoType",
             ("kind", Uint8),
             ("alg", PointerTo(GoAlg)),
             ("gc", PointerTo(Uint8)),
-            ("string", PointerTo(GoString)),
+            ("name", PointerTo(GoString)),
             ("x", PointerTo(GoUncommonType)),
             #("pointerType", PointerTo(GoType)),  # recursion doesn't work yet
             ("pointerType", PointerTo(Uint8)),
@@ -852,19 +885,19 @@ def do_tests():
 def dump_type(env, ea):
     t = GoType(ea, env=env)
     g_logger.debug("name: %s, size: %s",
-            t.get("*string.*pstring"),
+            str(t.get("*name")),
             hex(t.get_size().value()))
 
     pointerType = None
     pointerType = GoType(t.get_pointerType().value(), env=env)
 
     g_logger.debug("ptr: %s, size: %s",
-            pointerType.get("*string.*pstring"),
+            str(pointerType.get("*name")),
             hex(pointerType.get_size().value()))
 
     g_logger.debug("uncommon: name: %s, pkgPath: %s",
-            t.get("*x.*name.*pstring"),
-            t.get("*x.*pkgPath.*pstring"))
+            str(t.get("*x.*name")),
+            str(t.get("*x.*pkgPath")))
 
 
 # TODO: cleanup these markup functions. refactor them out or something
@@ -884,11 +917,11 @@ def markup_fields(base_name, fields):
 def markup_string(env, ea):
     t = GoString(ea, env=env)
 
-    val = str(t.get("*pstring"))
+    val = str(t)
     MakeComm(ea, str("String: %s" % (val)))
 
     tt = "string_" + val.replace("*", "ptr_")
-    markup_fields(tt, t._applied_fields)  # TODO: don't reach
+    markup_fields(tt, t.get_fields())
 
     idaapi.set_name(ea, tt)
 
@@ -896,11 +929,11 @@ def markup_string(env, ea):
 def markup_uncommon_type(env, ea):
     t = GoUncommonType(ea, env=env)
 
-    type_name = str(t.get("*name.*pstring"))
+    type_name = str(t.get("*name"))
     MakeComm(ea, str("UncommonType: %s" % (type_name)))
 
     tt = "uncommontype_" + type_name.replace("*", "ptr_")
-    markup_fields(tt, t._applied_fields)  # TODO: don't reach
+    markup_fields(tt, t.get_fields())
     idaapi.set_name(ea, tt)
 
     try:
@@ -917,11 +950,11 @@ def markup_uncommon_type(env, ea):
 def markup_type(env, ea):
     t = GoType(ea, env=env)
 
-    type_name = str(t.get("*string.*pstring"))
+    type_name = str(t.get("*name"))
     MakeComm(ea, str("Type: %s" % (type_name)))
 
     tt = "type_" + type_name.replace("*", "ptr_")
-    markup_fields(tt, t._applied_fields)  # TODO: don't reach
+    markup_fields(tt, t.get_fields())
     idaapi.set_name(ea, tt)
 
     try:
@@ -940,7 +973,7 @@ def dump_this_type():
 
 
 def main():
-    #do_tests()
+    do_tests()
     #markup_type(IDAEnv(), ScreenEA())
     #dump_this_type()
     if len(sys.argv) == 3:
