@@ -1,3 +1,5 @@
+import os
+import sys
 import struct
 import logging
 from collections import namedtuple
@@ -12,13 +14,22 @@ except ImportError:
     g_logger.warning("Failed to import IDA libs")
 
 
+try:
+    viv_dir = os.environ.get("VIV_DIR", "/home/willi/.software/vivisect_20140803")
+    g_logger.debug("Using VIV_DIR: %s", viv_dir)
+    sys.path.append(viv_dir)
+    import vivisect
+    import envi
+except ImportError:
+    g_logger.warning("Failed to import Vivisect libs")
+
+
 class Env(object):
     """
     Interface for static analysis environment APIs
     """
     ARCH_BITS_32 = 32
     ARCH_BITS_64 = 64
-    ENV_TYPE_LOCAL = "local"
 
     def __init__(self):
         super(Env, self).__init__()
@@ -35,8 +46,20 @@ class Env(object):
         """
         raise NotImplementedError()
 
+    def set_comment(self, ea, comment):
+        raise NotImplementedError()
+
+    def set_variable_name(self, ea, name):
+        raise NotImplementedError()
+
+    def set_function_name(self, ea, name):
+        raise NotImplementedError()
+
 
 class IDAEnv(Env):
+    """
+    idc and idaapi must be imported
+    """
     def __init__(self):
         super(IDAEnv, self).__init__()
 
@@ -48,6 +71,15 @@ class IDAEnv(Env):
             return Env.ARCH_BITS_64
         else:
             return Env.ARCH_BITS_32
+
+    def set_comment(self, ea, comment):
+        MakComm(ea, comment)
+
+    def set_variable_name(self, ea, name):
+        set_name(ea, name)
+
+    def set_function_name(self, ea, name):
+        set_name(ea, name)
 
 
 class LocalEnv(Env):
@@ -64,6 +96,50 @@ class LocalEnv(Env):
             return Env.ARCH_BITS_32
         else:
             return Env.ARCH_BITS_64
+
+    def set_comment(self, ea, comment):
+        g_logger.debug("LocalEnv::set_comment - stubbed out")
+        g_logger.debug("%s comment: %s", hex(ea), comment)
+
+    def set_variable_name(self, ea, name):
+        g_logger.debug("LocalEnv::set_variable_name - stubbed out")
+        g_logger.debug("%s variable: %s", hex(ea), comment)
+
+    def set_function_name(self, ea, name):
+        g_logger.debug("LocalEnv::set_function_name - stubbed out")
+        g_logger.debug("%s function: %s", hex(ea), comment)
+
+
+class VivEnv(Env):
+    """
+    vivisect and envi must be imported
+    """
+    def __init__(self, vw):
+        super(VivEnv, self).__init__()
+        self._vw = vw
+
+    def get_bytes(self, ea, size):
+        return self._vw.readMemory(ea, size)
+
+    def get_arch_bits(self):
+        if isinstance(self._vw.arch, envi.archs.amd64.Amd64Module):
+            return Env.ARCH_BITS_64
+        else:
+            # atm, assume is 32
+            return Env.ARCH_BITS_32
+
+    def set_comment(self, ea, comment):
+        # TEST
+        self._vw.setComment(ea, comment)
+
+    def set_variable_name(self, ea, name):
+        # TEST
+        set_name(ea, name)
+
+    def set_function_name(self, ea, new_name):
+        # TEST
+        ret_type, ret_name, call_conv, func_name, args = self._vw.getFunctionApi(ea)
+        self._vw.setFunctionApi(ea, (ret_type, ret_name, call_conv, new_name, args))
 
 
 def guess_env():
@@ -864,9 +940,14 @@ def dump_this_type():
 
 
 def main():
-    do_tests()
-    markup_type(IDAEnv(), ScreenEA())
-    dump_this_type()
+    #do_tests()
+    #markup_type(IDAEnv(), ScreenEA())
+    #dump_this_type()
+    if len(sys.argv) == 3:
+        if "viv" in sys.argv[1]:
+            vw = vivisect.VivWorkspace()
+            vw.loadWorkspace(sys.argv[1])
+            dump_type(VivEnv(vw), int(sys.argv[2], 0x10))
 
 
 if __name__ == "__main__":
