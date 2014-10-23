@@ -83,10 +83,16 @@ class IDAEnv(Env):
 
 
 class LocalEnv(Env):
+    """
+    local stub for testing. operates against bytestring `buf`.
+    """
     def __init__(self, buf, is_32=True):
         super(LocalEnv, self).__init__()
         self._buf = buf
         self._is_32 = is_32
+        self._comments = {}  # type: dict(int, string)
+        self._variable_names = {}  # type: dict(int, string)
+        self._function_names = {}  # type: dict(int, string)
 
     def get_bytes(self, ea, size):
         return self._buf[ea:ea+size]
@@ -100,14 +106,17 @@ class LocalEnv(Env):
     def set_comment(self, ea, comment):
         g_logger.debug("LocalEnv::set_comment - stubbed out")
         g_logger.debug("%s comment: %s", hex(ea), comment)
+        self._comments[ea] = comment
 
     def set_variable_name(self, ea, name):
         g_logger.debug("LocalEnv::set_variable_name - stubbed out")
         g_logger.debug("%s variable: %s", hex(ea), comment)
+        self._variable_names[ea] = name
 
     def set_function_name(self, ea, name):
         g_logger.debug("LocalEnv::set_function_name - stubbed out")
         g_logger.debug("%s function: %s", hex(ea), comment)
+        self._function_names[ea] = name
 
 
 class VivEnv(Env):
