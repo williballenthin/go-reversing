@@ -135,7 +135,8 @@ class VivEnv(Env):
 
     def set_variable_name(self, ea, name):
         # TEST
-        set_name(ea, name)
+        # TODO: figure out how to do this. probably vw.addLocation.
+        raise NotImplementedError()
 
     def set_function_name(self, ea, new_name):
         # TEST
@@ -157,12 +158,16 @@ class BadArchitectureException(Exception):
 
 
 class Struct(object):
+    """
+    A structure is a pointer to some address, from which
+     memory might be read (relative).
+    """
     def __init__(self, ea, env=guess_env()):
         super(Struct, self).__init__()
         self._ea = ea
 
     def read_bytes(self, ea, size):
-        return self._env.get_bytes(ea, size)
+        return self._env.get_bytes(self._ea + ea, size)
 
     def _unpack(self, pat, size, ea):
         return struct.unpack(pat, self.read_bytes(ea, size))[0]
@@ -186,12 +191,6 @@ class Struct(object):
             return self.read_uint64(ea)
         else:
             raise BadArchitectureException()
-
-    def deref(self, ea):
-        """
-        alias
-        """
-        return self.read_ptr(ea)
 
 
 class W(object):
@@ -255,7 +254,7 @@ def MakeWPrimitive(name, fmt, size, str_formatter=str):
         Struct.__init__(self, ea, env=env)
 
     def _parse(self):
-        return self._unpack(fmt, size, self._ea)
+        return self._unpack(fmt, size, 0)
 
     def __len__(self):
         if hasattr(size, "__call__"):
@@ -307,7 +306,7 @@ class WString(WPrimitive, W, Struct):
         self._decoder = decoder
 
     def _parse(self):
-        return self.read_bytes(self._ea, len(self)).decode(self._decoder)
+        return self.read_bytes(0, len(self)).decode(self._decoder)
 
     def __len__(self):
         if isinstance(self._size, basestring):
@@ -609,14 +608,6 @@ def PointerTo(target_type, base=0):
     def __init__(self, ea, env=guess_env(), parent=None):
         WPointer.__init__(self, ea, env, parent)
 
-    def _parse(self):
-        if self._env.get_arch_bits() == Env.ARCH_BITS_32:
-            return self._unpack("<I", 4, self._ea)
-        elif self._env.get_arch_bits() == Env.ARCH_BITS_64:
-            return self._unpack("<Q", 8, self._ea)
-        else:
-            raise BadArchitectureException()
-
     def __len__(self):
         if self._env.get_arch_bits() == Env.ARCH_BITS_32:
             return 4
@@ -626,7 +617,7 @@ def PointerTo(target_type, base=0):
             raise BadArchitectureException()
 
     def __str__(self):
-        return hex(self._parse())
+        return hex(self.value())
 
     def __repr__(self):
         if base != 0:
@@ -636,16 +627,16 @@ def PointerTo(target_type, base=0):
         else:
             return "Pointer(to=%s, ea=%s)" % (target_type.__name__, hex(self._ea))
 
+    def value(self):
+        return self.read_ptr(0x0)
+
     def deref(self):
-        ea = self._parse()
+        ea = self.value()
         if ea == 0:
             g_logger.warning("Dereferencing NULL")
             return WNull(env=self._env, parent=self)
 
         return target_type(base + ea, env=self._env, parent=self)
-
-    def value(self):
-        return self._parse()
 
     def get(self, path, sep="."):
         if len(path) == 0:
@@ -688,7 +679,6 @@ def PointerTo(target_type, base=0):
     return type("Pointer",
                (WPointer,),
                {"__init__": __init__,
-                "_parse": _parse,
                 "__len__": __len__,
                 "__str__": __str__,
                 "__repr__": __repr__,
