@@ -16,7 +16,7 @@ except ImportError:
 
 try:
     viv_dir = os.environ.get("VIV_DIR", "/home/willi/.software/vivisect_20140803")
-    g_logger.debug("Using VIV_DIR: %s", viv_dir)
+    g_logger.debug("Using $VIV_DIR: %s", viv_dir)
     sys.path.append(viv_dir)
     import vivisect
     import envi
@@ -130,6 +130,7 @@ class VivEnv(Env):
 
     def set_comment(self, ea, comment):
         # TEST
+        # TODO: check add vs overwrite
         self._vw.setComment(ea, comment)
 
     def set_variable_name(self, ea, name):
@@ -157,7 +158,7 @@ class BadArchitectureException(Exception):
 
 class Struct(object):
     def __init__(self, ea, env=guess_env()):
-        #super(Struct, self).__init__()
+        super(Struct, self).__init__()
         self._ea = ea
 
     def read_bytes(self, ea, size):
@@ -196,6 +197,10 @@ class Struct(object):
 class W(object):
     """
     interface for use in this W thing
+
+    Its mostly key for each W object to have a length.
+    This time around, we force it to be an instancemethod, not
+     a staticmethod
     """
     def __len__(self):
         raise NotImplementedError()
@@ -209,6 +214,7 @@ class W(object):
 
 class WPrimitive(object):
     def __init__(self, ea, env=guess_env(), parent=None):
+        # seems we can't use `super` if we dynamically create types?
         #super(WPrimitive, self).__init__()
         self._env = env
         self._ea = ea
@@ -219,10 +225,12 @@ class WPrimitive(object):
 
 
 class WNull(W, WPrimitive):
+    """
+    Introduce null pointer dereferences.
+    """
     def __init__(self, env=guess_env, parent=None):
         W.__init__(self)
         WPrimitive.__init__(self, 0, env, parent)
-
 
     def __len__(self):
         return 0
@@ -336,10 +344,10 @@ class InvalidPathException(Exception):
 
 
 # type name: str
-# type offset: int
+# type ea: int
 # type instance: W
 # type len: int
-WField = namedtuple("WField", ["name", "offset", "instance", "len"])
+WField = namedtuple("WField", ["name", "ea", "instance", "len"])
 
 
 class WStruct(object):
@@ -369,7 +377,7 @@ class WStruct(object):
         self._field_state = 0
         self._applied_fields = []
         self._fields_by_name = {}  # type: map(str, WField)
-        self._fields_by_offset = {}  # type: map(int, WField)
+        self._fields_by_ea = {}  # type: map(int, WField)
         self._total_length = 0
 
     def _apply_fields(self):
@@ -385,7 +393,7 @@ class WStruct(object):
             field = WField(field_name, ea, field_instance, field_size)
 
             self._fields_by_name[field_name] = field
-            self._fields_by_offset[ea] = field
+            self._fields_by_ea[ea] = field
             self._applied_fields.append(field)
 
             ea += field_size
@@ -516,7 +524,7 @@ class WStruct(object):
             if isinstance(field.instance, (WPrimitive)):
                 ret.append("%s/* %s */ (%s) %s: %s\n" % (
                            "  " * indent,
-                           hex(field.offset),
+                           hex(field.ea),
                            repr(field.instance),
                            field.name,
                            str(field.instance.value())))
@@ -524,14 +532,14 @@ class WStruct(object):
                 if isinstance(field.instance.deref(), (WPrimitive)):
                     ret.append("%s/* %s */ *(%s) %s: %s\n" % (
                                "  " * indent,
-                               hex(field.offset),
+                               hex(field.ea),
                                repr(field.instance.deref()),
                                field.name,
                                str(field.instance.deref().value())))
                 else:
                     ret.append("%s/* %s */ (%s) %s: %s\n" %
                                ("  " * indent,
-                               hex(field.offset),
+                               hex(field.ea),
                                repr(field.instance),
                                field.name,
                                hex(field.instance.value())))
@@ -540,7 +548,7 @@ class WStruct(object):
             else:
                 ret.append("%s/* %s */ (%s) %s:\n" %
                            ("  " * indent,
-                           hex(field.offset),
+                           hex(field.ea),
                            repr(field.instance),
                            field.name))
                 ret.append(field.instance.dump(indent + 1))
@@ -903,15 +911,15 @@ def dump_type(env, ea):
 # TODO: cleanup these markup functions. refactor them out or something
 def markup_fields(base_name, fields):
     for field in fields:
-        idaapi.set_name(field.offset, base_name + "_" + field.name)
+        idaapi.set_name(field.ea, base_name + "_" + field.name)
         if len(field.instance) == 1:
-            MakeByte(field.offset)
+            MakeByte(field.ea)
         if len(field.instance) == 2:
-            MakeWord(field.offset)
+            MakeWord(field.ea)
         if len(field.instance) == 4:
-            MakeDword(field.offset)
+            MakeDword(field.ea)
         if len(field.instance) == 8:
-            MakeQword(field.offset)
+            MakeQword(field.ea)
 
 
 def markup_string(env, ea):
