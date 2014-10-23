@@ -351,7 +351,10 @@ WField = namedtuple("WField", ["name", "ea", "instance", "len"])
 
 
 class WStruct(object):
-
+    """
+    WStruct is the most basic complex W datatype. Its an ordered set
+      of contiguous member W items.
+    """
     # these allow us to lookup values of sibling fields without fully
     #  resolving all of them. They prevent infinite loops when looking
     #  for those fields.
@@ -372,13 +375,14 @@ class WStruct(object):
         self._ea = ea
         self._parent = parent
 
+        self._field_state = WStruct.FIELD_STATE_NEW
+        self._total_length = 0
+
         # this is not particularly memory friendly, but
         #   thats why we have it.
-        self._field_state = 0
-        self._applied_fields = []
+        self._applied_fields = []  # type: list of WField
         self._fields_by_name = {}  # type: map(str, WField)
         self._fields_by_ea = {}  # type: map(int, WField)
-        self._total_length = 0
 
     def _apply_fields(self):
         if self._field_state > WStruct.FIELD_STATE_NEW:
@@ -389,6 +393,9 @@ class WStruct(object):
         self._total_length = 0
         for field_name, field_type in self._fields:
             field_instance = field_type(ea, env=self._env, parent=self)
+            # this potentially calls `self.get_field` if the item reaches
+            #   up into its parent (this `self`) to resolve a size field.
+            # we expect this, but lets not forget it
             field_size = len(field_instance)
             field = WField(field_name, ea, field_instance, field_size)
 
@@ -507,7 +514,6 @@ class WStruct(object):
         """
         Get this (potentially nested) struct as an unordered dict.
         """
-        self._apply_fields()
         ret = {}
         for field in self.get_fields():
             if isinstance(field, WPrimitive):
@@ -517,9 +523,12 @@ class WStruct(object):
         return ret
 
     def dump(self, indent=0):
-        self._apply_fields()
+        """
+        Return a semi-formatted string describing the (potentially
+          nested data.
+        Not really very nice, but includes offset/type/size per field.
+        """
         ret = []
-
         for field in self.get_fields():
             if isinstance(field.instance, (WPrimitive)):
                 ret.append("%s/* %s */ (%s) %s: %s\n" % (
@@ -863,6 +872,7 @@ GoUncommonType = MakeWStruct("GoUncommonType",
             ("m", PointerTo(Uint8))))  # TODO
 
 
+GoType = None
 GoType = MakeWStruct("GoType",
         (
             ("size", Uint64),
